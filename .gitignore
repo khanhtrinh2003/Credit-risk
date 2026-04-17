@@ -1,4 +1,6 @@
 .DS_Store
+# Local data — exceeds GitHub 100MB limit; use cds.csv.zip or your own copy
+cds.csv
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
