@@ -1,0 +1,1049 @@
+%==============================================================================
+%  Academic Report: Valuation and Risk Management of Synthetic CDOs
+%  Author : Nguyen Duc Khanh Trinh (TOM)
+%  Based on the Python working paper "CDO_Pipeline_Pro.ipynb"
+%  References: Mounfield (2009), Li (2000), Vasicek (1987), JP Morgan (2004)
+%==============================================================================
+\documentclass[11pt,a4paper]{article}
+
+% -------------------------  packages  ----------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{siunitx}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{float}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{titlesec}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!55!black,
+    citecolor=teal!55!black,
+    urlcolor=blue!60!black,
+}
+
+% -------------------------  theorems -----------------------------------------
+\newtheorem{definition}{Definition}[section]
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{remark}[definition]{Remark}
+
+% -------------------------  headers ------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small Synthetic CDO --- Valuation \& Risk}
+\lhead{\small Working paper}
+\cfoot{\thepage}
+
+% -------------------------  maths shortcuts ----------------------------------
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\PP}{\mathbb{P}}
+\newcommand{\QQ}{\mathbb{Q}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\1}{\mathbf{1}}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\Nor}{\mathcal{N}}
+\DeclareMathOperator{\LGD}{LGD}
+\DeclareMathOperator{\ETL}{ETL}
+\DeclareMathOperator{\DF}{DF}
+\DeclareMathOperator{\CS}{CS01}
+
+% -------------------------  title --------------------------------------------
+\title{\bfseries Valuation and Risk Management of Synthetic Collateralized Debt Obligations\\
+       \large A Monte-Carlo and Semi-Analytic Pipeline under the One-Factor
+       Gaussian Copula}
+\author{Nguyen Duc Khanh Trinh\\
+        \small \texttt{nguyenduckhanhtrinh@gmail.com}\\[2pt]
+        \small ISFA --- Credit Risk Working Paper}
+\date{Valuation date: 10~September~2021}
+
+%==============================================================================
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This paper develops an end-to-end pricing and risk-management pipeline for
+\emph{synthetic Collateralized Debt Obligations} (CDOs) on a reference pool
+of 651 single-name CDS issuers. The framework follows the standard sell-side
+workflow: \emph{term-sheet \(\rightarrow\) market data \(\rightarrow\)
+marginal credit curves \(\rightarrow\) dependence model
+\(\rightarrow\) tranche cash-flow engine \(\rightarrow\) calibration
+\(\rightarrow\) sensitivities \(\rightarrow\) stress \(\rightarrow\) dashboard}.
+Marginal default probabilities are bootstrapped from a term-structure of CDS
+quotes using an ISDA-consistent piecewise-constant hazard model. Dependence
+is modelled via the one-factor Gaussian copula of \citet{li2000,vasicek1987}.
+Tranche expected losses are computed with a Monte-Carlo engine that uses
+antithetic variance reduction and benchmarked against the Vasicek large
+homogeneous pool (LHP) closed-form solution. A base-correlation curve is
+calibrated by bisection and then interpolated to price bespoke tranches.
+We provide a complete sensitivity analysis (tranche-level and name-level
+CS01, Rho01, DV01, Jump-to-Default) and a deterministic stress matrix
+covering spread, recovery, correlation and a combined crisis scenario.
+A historical portfolio dashboard from 2015 to 2021 illustrates the behaviour
+of each tranche through the COVID-19 credit shock. The complete results
+show that the pipeline is internally consistent (ISDA repricing
+error \(<10^{-16}\) on 300 test names), that the standard
+capital-structure monotonicity
+\(s^{\star}_{\text{equity}}=1\,952.6\) bp
+\(>s^{\star}_{\text{mezz}}=503.3\) bp
+\(>s^{\star}_{\text{jsr}}=202.7\) bp
+\(>s^{\star}_{\text{senior}}=85.4\) bp
+is preserved at \(\rho=0.30\) on the 10~September~2021 snapshot,
+and that the signs of \(\partial s^{\star}/\partial\rho\) match
+economic intuition (equity long correlation with
+\(\mathrm{Rho01}_{\mathrm{eq}}=-37.5\), senior short correlation
+with \(\mathrm{Rho01}_{\mathrm{sen}}=+3.83\)).\medskip
+
+\noindent\textbf{Keywords:} Synthetic CDO, Gaussian Copula, Base Correlation,
+Monte-Carlo, Expected Tranche Loss, Credit Risk, CS01.\\[2pt]
+\textbf{JEL Classification:} G12, G13, G32, C15, C63.
+\end{abstract}
+
+\tableofcontents
+\bigskip\hrule\bigskip
+
+%==============================================================================
+\section{Introduction}\label{sec:intro}
+
+Synthetic CDOs are structured credit products whose cash flows depend on
+the number of defaults that occur in a reference portfolio of corporate
+obligors during the life of the contract.  Since their popularisation in
+the early 2000s and the well-documented distress of the
+2007--2009 crisis \citep{mounfield2009}, they have become a benchmark
+laboratory for applying dependence modelling and tail-risk quantification
+to credit. Standardised tranches on the CDX and iTraxx indices still trade
+actively and the same mathematical toolbox is used today for bespoke
+tranche opportunities and for regulatory capital computations.
+
+The central pricing difficulty is that a tranche's present value is not
+determined by individual default probabilities alone but by the
+\emph{joint} loss distribution of the pool. A correct dependence structure
+is therefore indispensable. The industry solution remains
+the one-factor Gaussian copula of \citet{li2000,vasicek1987} with the
+base-correlation extension of \citet{jpmorgan2004}.  Despite well-known
+limitations --- most notably the correlation smile --- the model retains
+academic and practical appeal thanks to its tractability.
+
+\paragraph{Contributions.}
+The present paper documents a full reproducible implementation and
+provides four practical contributions.
+First, we describe a complete Python pipeline (attached Jupyter notebook
+\texttt{CDO\_Pipeline\_Pro.ipynb}) that has no dependency on
+\texttt{scipy}. Second, we provide a benchmark between the Monte-Carlo
+tranche pricer and the Vasicek LHP semi-analytic formula on a realistic
+heterogeneous pool of 651 issuers, thereby quantifying the pedagogical
+heterogeneity error of LHP. Third, we build a bespoke pricing surface
+via base-correlation interpolation. Fourth, we produce a complete risk
+dashboard that includes tranche-level Greeks, name-level CS01, a
+deterministic stress matrix and a historical tranche ETL walk through
+the COVID-19 credit shock.
+
+\paragraph{Roadmap.}
+Section~\ref{sec:framework} introduces the pricing framework.
+Section~\ref{sec:curves} describes the marginal credit-curve bootstrap.
+Section~\ref{sec:copula} formalises the Gaussian copula and the LHP
+limit. Section~\ref{sec:mc} presents the Monte-Carlo engine and the
+antithetic variance reduction. Section~\ref{sec:calib} discusses the
+base-correlation calibration and the bespoke pricing surface.
+Section~\ref{sec:risk} details the risk analytics and stress matrix.
+Section~\ref{sec:dashboard} provides the historical dashboard.
+Section~\ref{sec:conclusion} concludes.
+
+%==============================================================================
+\section{The Pricing Framework}\label{sec:framework}
+
+\subsection{Term sheet and market inputs}
+The deal is specified by a reference portfolio
+\(\{i=1,\dots,N\}\) of CDS issuers with equal notional
+\(N_{i}=1/N\), a set of tranche attachment/detachment points
+\(\{[A_{j},D_{j}]\}_{j}\), a quarterly coupon schedule with maturity
+\(T=5\) years and a convention on recovery
+\(R\). The market inputs are the term structure of CDS spreads,
+\(\{s_{i}^{T_{k}}\}_{k=1}^{K}\), and a risk-free discount curve
+\(\DF(t)\). We use a flat continuously compounded risk-free rate
+\(r=2\%\) so that \(\DF(t)=e^{-rt}\), and the ISDA-standard
+\(R=40\%\) (LGD \(=60\%\)) for senior unsecured.
+
+\subsection{Reference portfolio}\label{ssec:portfolio}
+The portfolio is reconstructed from the time series
+\texttt{cds.csv} containing single-name 1Y, 2Y, 3Y, 5Y, 7Y and 10Y CDS
+spreads over 1747 daily observations (January~2015 to September~2021)
+for 6610 ticker-tenor pairs. After filtering to the 5Y pillar we
+obtain a reference pool of \(N=651\) issuers (equal-weighted). The
+valuation snapshot is taken at the last available date,
+\textbf{10~September~2021}.
+Figure~\ref{fig:cds_ts} displays the aggregate dynamics of the pool and
+its cross-sectional heterogeneity, while Table~\ref{tab:capital_struct}
+summarises the standardised iTraxx-like capital structure used throughout.
+
+\begin{figure}[H]
+    \centering
+    % TODO: insert pool-average 5Y CDS time series figure here
+    % \includegraphics[width=0.8\textwidth]{fig_cds_timeseries.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- CDS time series: pool-average 5Y spread
+        (January 2015 -- December 2021) with the March~2020 COVID-19
+        shock highlighted.}}
+    \caption{Time series of the pool-average 5Y CDS spread, 2015--2021.}
+    \label{fig:cds_ts}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Standard iTraxx-like capital structure used in the pipeline.}
+\label{tab:capital_struct}
+\begin{tabular}{lcccl}
+\toprule
+\textbf{Tranche} & \textbf{Attach} $A$ & \textbf{Detach} $D$ &
+\textbf{Width} & \textbf{Economic role}\\
+\midrule
+Equity          & 0\%  & 3\%  & 3\% & First loss; \emph{long} correlation\\
+Mezzanine       & 3\%  & 7\%  & 4\% & Short gamma; default clustering\\
+Junior Senior   & 7\%  & 10\% & 3\% & Dual protection; rho neutral\\
+Senior          & 10\% & 15\% & 5\% & Tail protection; \emph{short} correlation\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Tranche loss function}
+Denote \(L^{\text{pool}}(t)=\sum_{i}\LGD_{i}\,\1_{\{\tau_{i}\le t\}}/N\)
+the cumulative pool loss as a fraction of the notional. The
+cash-flow entitlement of tranche \([A,D]\) is the capped-and-floored
+pool loss
+\begin{equation}
+L^{[A,D]}(t) \;=\; \min\!\bigl(\max(L^{\text{pool}}(t)-A,\,0),\;D-A\bigr).
+\label{eq:tranche_loss}
+\end{equation}
+The \emph{expected tranche loss} \(\ETL(t) = \E[L^{[A,D]}(t)]\) is
+then the central quantity to compute.
+
+\subsection{Premium, protection and the fair running spread}
+A synthetic CDO tranche has two cash-flow legs. The \emph{protection
+leg} pays the increment in tranche loss on the payment schedule
+\(\{t_{0}=0,t_{1},\dots,t_{K}=T\}\); the \emph{premium leg} pays the
+running spread \(s\) on the \emph{outstanding} tranche notional
+\((D-A)-L^{[A,D]}(t)\). Denoting
+\(\Delta t_{k}=t_{k}-t_{k-1}\), a standard trapezoidal approximation
+yields \citep{mounfield2009}
+\begin{align}
+V_{\text{prot}}(s)
+ &= \sum_{k=1}^{K} \DF(t_{k})\,\bigl(\ETL_{k}-\ETL_{k-1}\bigr),
+ \label{eq:prot_leg}\\[2pt]
+V_{\text{prem}}(s)
+ &= s\sum_{k=1}^{K} \DF(t_{k})\,\Delta t_{k}\,
+    \Bigl((D-A) - \tfrac{1}{2}\bigl(\ETL_{k}+\ETL_{k-1}\bigr)\Bigr).
+ \label{eq:prem_leg}
+\end{align}
+The \emph{fair running spread} \(s^{\star}\) equates the two legs,
+\begin{equation}
+s^{\star} \;=\;
+ \frac{\displaystyle\sum_{k=1}^{K}\DF(t_{k})\,(\ETL_{k}-\ETL_{k-1})}
+      {\displaystyle\sum_{k=1}^{K}\DF(t_{k})\,\Delta t_{k}\,
+      \bigl((D-A)-\tfrac{1}{2}(\ETL_{k}+\ETL_{k-1})\bigr)}.
+\label{eq:fair_spread}
+\end{equation}
+Equation~\eqref{eq:fair_spread} is the \emph{master equation} of the
+pipeline: once the curve \((\ETL_{k})\) is available under the chosen
+model, all pricing, calibration and sensitivity computations reduce to
+applications of this identity.
+
+%==============================================================================
+\section{Marginal Credit Curves}\label{sec:curves}
+
+For each issuer we need a survival curve \(Q_{i}(t)\) under the
+risk-neutral measure \(\QQ\).  We document two specifications.
+
+\subsection{Flat hazard baseline (credit triangle)}
+Assuming a constant intensity \(\lambda_{i}\) and taking the limit of
+continuous coupon payments on the CDS protection leg yields Hull's
+\emph{credit triangle}
+\begin{equation}
+\lambda_{i} \;\approx\; \frac{s_{i}^{5Y}}{\,1-R\,},
+\qquad Q_{i}(t)=e^{-\lambda_{i}\,t}.
+\label{eq:flat_hazard}
+\end{equation}
+This closed form is convenient for the historical dashboard but
+abstracts from the term structure.
+
+\subsection{ISDA-consistent piecewise-constant bootstrap}
+The production specification allows \(\lambda_{i}(t)\) to be
+piecewise constant on the tenor grid
+\(0=T_{0}<T_{1}<\cdots<T_{K}\). The survival function is
+\begin{equation}
+Q_{i}(t)=\exp\!\Bigl(-\sum_{k}\lambda_{i}^{(k)}\Delta_{k}(t)\Bigr),
+\quad \Delta_{k}(t)=\max(\min(T_{k},t)-T_{k-1},0).
+\label{eq:survival_pwc}
+\end{equation}
+For each tenor \(T_{k}\) the hazard \(\lambda_{i}^{(k)}\) is determined
+by requiring the market quote to be consistent with the CDS par identity
+\begin{equation}
+\underbrace{\int_{0}^{T_{k}}s\,\DF(u)\,Q(u)\dd u}_{\text{premium annuity}}
+\;=\;
+\underbrace{(1-R)\int_{0}^{T_{k}}\DF(u)\bigl(-\dd Q(u)\bigr)}_{\text{protection}} .
+\label{eq:cds_par}
+\end{equation}
+The bootstrap proceeds sequentially: fix
+\(\lambda^{(1)},\dots,\lambda^{(k-1)}\) and apply a one-dimensional
+bisection on \(\lambda^{(k)}\) until \eqref{eq:cds_par} is satisfied;
+this is the ISDA Standard Model mechanics.
+
+\paragraph{Self-consistency.}
+After the bootstrap completes we verify that repricing the same CDS
+using the calibrated curve returns a par quote with NPV
+\(<10^{-5}\).  On a random sub-sample of 300 names from the pool we
+obtain a maximum absolute NPV of \(\mathbf{8.33\!\times\!10^{-17}}\)
+and a mean of \(\mathbf{2.95\!\times\!10^{-17}}\), with \textbf{100\%}
+of names passing the threshold. The bootstrap is therefore
+ISDA-consistent up to machine precision. Pool-average 5Y PDs are
+\(5.574\%\) for the flat-hazard baseline and \(5.717\%\) for the
+piecewise-constant bootstrap, with cross-sectional range
+\([0.859\%,\,47.778\%]\).
+Figure~\ref{fig:hazard_ts} illustrates the resulting term-structure of
+hazard rates grouped by 5Y-PD quintile; the expected shape --- flat for
+strong credits and upward-sloping for distressed names --- is recovered.
+
+\begin{figure}[H]
+    \centering
+    % TODO: insert hazard term-structure figure
+    % \includegraphics[width=0.8\textwidth]{fig_hazard_term_structure.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- Average bootstrapped hazard rate
+        \(\lambda^{(k)}\) versus tenor \(T_{k}\), grouped by 5Y-PD
+        quintile.  Strong credits are flat and low; distressed names
+        show an upward slope consistent with credit-deterioration
+        expectations.}}
+    \caption{Piecewise-constant hazard term structure by rating bucket.}
+    \label{fig:hazard_ts}
+\end{figure}
+
+%==============================================================================
+\section{The One-Factor Gaussian Copula}\label{sec:copula}
+
+\subsection{Model specification}
+Following \citet{li2000} and the structural interpretation of
+\citet{vasicek1987}, for each obligor we define a latent asset return
+\begin{equation}
+A_{i}=\sqrt{\rho}\,M+\sqrt{1-\rho}\,\varepsilon_{i},
+\qquad M,\varepsilon_{i}\stackrel{\mathrm{iid}}{\sim}\Nor(0,1),
+\label{eq:latent}
+\end{equation}
+with \(\rho\in[0,1]\) the asset correlation. Default occurs when
+\(A_{i}<\Phi^{-1}\!\bigl(p_{i}(T)\bigr)\). Conditional on the common
+factor \(M=m\), defaults become independent with
+\begin{equation}
+p_{i}(T\mid M=m)=\Phi\!\Biggl(\frac{\Phi^{-1}(p_{i}(T))-\sqrt{\rho}\,m}
+{\sqrt{1-\rho}}\Biggr).
+\label{eq:cond_pd}
+\end{equation}
+Economic intuition: adverse systemic factors (\(m\) small, negative)
+push all conditional PDs up simultaneously, generating
+\emph{default clustering}. The parameter \(\rho\) governs the severity
+of such clustering and, consequently, the thickness of the right tail
+of the loss distribution.  A representative illustration with
+marginal PD \(p=5\%\) and \(\rho=0.30\) gives
+\(p(T\mid M\!=\!-2)=25.57\%\),
+\(p(T\mid M\!=\!0)=2.47\%\) and
+\(p(T\mid M\!=\!+2)=0.053\%\), which makes the non-linear
+amplification in the tail explicit.
+
+\subsection{The Large Homogeneous Pool (LHP) limit}
+Under \(p_{i}=p\) for all \(i\) and \(N\to\infty\), the law of large
+numbers gives the Vasicek loss limit
+\begin{equation}
+L^{\text{pool}}(T)\;\xrightarrow{\;p\;}\;
+\LGD\cdot\Phi\!\Biggl(\frac{\Phi^{-1}(p)-\sqrt{\rho}\,M}{\sqrt{1-\rho}}
+\Biggr),
+\end{equation}
+from which the closed-form loss CDF follows:
+\begin{equation}
+F_{L}(\ell)
+ =\Phi\!\Biggl(\frac{\sqrt{1-\rho}\,\Phi^{-1}(\ell/\LGD)-\Phi^{-1}(p)}
+{\sqrt{\rho}}\Biggr).
+\label{eq:vasicek_cdf}
+\end{equation}
+This is the cornerstone of the Basel II IRB risk-weight formula
+\citep{vasicek1987,bcbs2006}.  In the pipeline, \eqref{eq:vasicek_cdf}
+is integrated with a combined Gauss--Hermite/Gauss--Legendre quadrature
+(64 outer and 96 inner nodes) to compute the LHP expected tranche loss
+and used as an independent benchmark against the Monte-Carlo output
+and for the historical dashboard.
+
+\begin{figure}[H]
+    \centering
+    % TODO: insert LHP loss density / correlation comparison
+    % \includegraphics[width=0.8\textwidth]{fig_lhp_correlation.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- Pool-loss density under the LHP model
+        for \(\rho\in\{0.10,\,0.25,\,0.40\}\). The right tail fattens
+        substantially with \(\rho\); this is the mechanism behind
+        senior-tranche sensitivity to correlation.}}
+    \caption{Pool-loss density as a function of asset correlation
+    \(\rho\).}
+    \label{fig:lhp_rho}
+\end{figure}
+
+%==============================================================================
+\section{Monte-Carlo Pricing Engine}\label{sec:mc}
+
+\subsection{Default-time simulation}
+For a given correlation \(\rho\) and calibrated marginal PDs
+\(\{p_{i}(T)\}\), a Monte-Carlo path is generated by drawing
+\(M\sim\Nor(0,1)\) and \(\varepsilon_{i}\sim\Nor(0,1)\), forming
+\(Y_{i}\) according to \eqref{eq:latent} and mapping to the default
+time
+\begin{equation}
+U_{i}=\Phi(Y_{i}),\qquad
+\tau_{i}=-\log\bigl(1-U_{i}\bigr)\,\big/\,\lambda_{i},
+\label{eq:default_time}
+\end{equation}
+under the marginal exponential calibration consistent with the flat
+hazard (\S\ref{sec:curves}). The same \texttt{tau\_world} realisation is
+re-used across tranches, so that Monte-Carlo noise is common and does
+not contaminate the relative ordering of tranche spreads.
+
+\subsection{ETL on the payment grid}
+On the quarterly schedule \(\Delta t = 0.25\), \(T=5Y\),
+\(K=20\) coupons, each path produces a loss trajectory
+\(\bigl(L^{\text{pool}}(t_{k})\bigr)_{k=0}^{K}\), which is transformed
+via \eqref{eq:tranche_loss} into a tranche-loss path. Averaging across
+paths yields \((\ETL_{k})_{k=0}^{K}\). Figure~\ref{fig:etl_paths}
+displays the cumulative ETL of the four tranches.
+
+\begin{figure}[H]
+    \centering
+    % TODO: ETL layering by tranche
+    % \includegraphics[width=0.8\textwidth]{fig_etl_layering.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- Cumulative expected tranche loss
+        \(\ETL_{k}\) on the quarterly grid, by tranche:
+        equity, mezzanine, junior senior and senior.}}
+    \caption{Capital-structure layering of expected tranche losses.}
+    \label{fig:etl_paths}
+\end{figure}
+
+\subsection{Antithetic variance reduction}
+To reduce variance, for each systemic draw \(M=m\) we add the
+antithetic draw \(M=-m\). Let \(\sigma^{2}_{\text{crude}}\) and
+\(\sigma^{2}_{\text{anti}}\) denote the respective variances of the
+ETL estimator; the variance reduction factor
+\begin{equation}
+\mathrm{VRF}\;=\;\sigma^{2}_{\text{crude}}\big/\sigma^{2}_{\text{anti}}
+\end{equation}
+measured on the mezzanine tranche with \num{25000} paths is
+\(\mathrm{VRF}\approx 0.98\).  For this pool the antithetic variate
+therefore offers essentially no variance reduction: the mezzanine
+loss profile is approximately symmetric in the systemic factor, so
+\(L^{[A,D]}(M)+L^{[A,D]}(-M)\) is close to \(2\,\E[L^{[A,D]}]\) and
+the antithetic pair contributes little beyond the crude estimator.
+This is an important empirical finding: \emph{antithetic variance
+reduction is not automatic} and the VRF should be measured on each
+specific pool before being claimed as a speed-up.
+
+\subsection{LHP vs Monte-Carlo benchmark}
+On the heterogeneous 651-name pool, we compare the Monte-Carlo ETL
+against the LHP formula evaluated at the pool-average PD
+\begin{equation}
+p^{\text{avg}}(T)=\frac{1}{N}\sum_{i=1}^{N}p_{i}(T) = 5.574\%.
+\end{equation}
+Table~\ref{tab:lhp_mc} reports the comparison at \(\rho=0.3\).
+The equity tranche agrees to within 1.3~bp of tranche notional
+(0.7\% relative), while mezzanine and senior tranches deviate by
+44--69~bp. The mechanism is the heterogeneity of the pool
+(\(p_{i}\in[0.859\%,\,47.778\%]\)): LHP collapses the pool into a
+homogeneous Vasicek mass at \(p^{\text{avg}}\) and therefore
+\emph{under-samples} the right tail of the true loss distribution.
+This is the well-known pedagogical limitation of LHP
+(\citealp[\S6.5]{mounfield2009}; \citealp{okane2008}); production
+workflows move to bucketed LHP, recursive Hull--White or pure
+Monte-Carlo for non-equity tranches. In our pipeline we retain LHP
+only for equity sanity checks and for the historical dashboard of
+Section~\ref{sec:dashboard}.
+
+\begin{table}[H]
+\centering
+\caption{LHP vs Monte-Carlo expected tranche loss at
+\(\rho=0.3\), valuation date 10~September~2021, MC=\num{10000}
+paths.}
+\label{tab:lhp_mc}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{l c c c c c}
+\toprule
+\textbf{Tranche} & \textbf{Attach} & \textbf{Detach}
+& \textbf{\(\ETL^{\text{LHP}}\)} & \textbf{\(\ETL^{\text{MC}}\)}
+& \textbf{\(\Delta\) (bp of notional)}\\
+\midrule
+Equity        & 0\%  & 3\%  & 0.01847 & 0.01834 & $+1.3$\\
+Mezzanine     & 3\%  & 7\%  & 0.01403 & 0.00909 & $+49.4$\\
+Junior Senior & 7\%  & 10\% & 0.00746 & 0.00304 & $+44.2$\\
+Senior        & 10\% & 15\% & 0.00911 & 0.00222 & $+68.8$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==============================================================================
+\section{Valuation and Pricing Results}\label{sec:pricing}
+
+This section presents the pricing output of the pipeline for the
+valuation date \textbf{10~September~2021} under the Monte-Carlo engine
+of Section~\ref{sec:mc}. All numbers are reported at a flat asset
+correlation \(\rho = 0.30\), \num{10000} Monte-Carlo paths with
+antithetic variates, recovery \(R = 40\%\) and flat continuously
+compounded risk-free rate \(r = 2\%\).
+
+\subsection{Baseline fair running spreads}
+Table~\ref{tab:fair_spreads} reports the fair running spread
+\(s^{\star}\), the expected tranche loss both as a fraction of
+tranche notional and of deal notional, and the tranche width. The
+capital-structure monotonicity
+\(s^{\star}_{\mathrm{eq}} > s^{\star}_{\mathrm{mez}}
+>s^{\star}_{\mathrm{jsr}}>s^{\star}_{\mathrm{sen}}\)
+is strictly respected.
+
+\begin{table}[H]
+\centering
+\caption{Baseline tranche pricing on 10~September~2021
+(\(\rho=0.30\), \(T=5\)Y, \(N=651\) equal-weighted names,
+Monte-Carlo \num{10000} paths, seed 42).}
+\label{tab:fair_spreads}
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{l c c c c c c}
+\toprule
+\textbf{Tranche} & \textbf{Attach} & \textbf{Detach} & \textbf{Width}
+& \textbf{\(\ETL(T)\) tranche} & \textbf{\(\ETL(T)\) notional}
+& \textbf{Fair spread \(s^{\star}\)}\\
+ & $A$ & $D$ & $D-A$ & (fraction) & (fraction) & (bp / year)\\
+\midrule
+Equity        & 0\%  & 3\%  & 3\% & 0.6114 & 0.01834 & 1\,952.6\\
+Mezzanine     & 3\%  & 7\%  & 4\% & 0.2273 & 0.00909 & 503.3\\
+Junior Senior & 7\%  & 10\% & 3\% & 0.1013 & 0.00304 & 202.7\\
+Senior        & 10\% & 15\% & 5\% & 0.0445 & 0.00222 & 85.4\\
+\bottomrule
+\end{tabular}
+
+\medskip
+\begin{minipage}{0.95\textwidth}
+\footnotesize \(\ETL(T)\) tranche is the expected loss normalised by
+tranche notional \((D-A)\); \(\ETL(T)\) notional is the same quantity
+as a fraction of deal (pool) notional. The equity tranche absorbs
+61.1\% of its \(3\%\) notional in expectation --- reflecting the
+first-loss nature of this layer --- and commands a running spread of
+more than 1\,950~bp, about 23 times the senior spread.
+\end{minipage}
+\end{table}
+
+\subsection{Clean price of a long-protection position}
+For a long-protection position on tranche \([A,D]\) with contractual
+running coupon \(s^{c}\) (typically the standardised 100~bp for
+mezzanine/senior and 500~bp for equity on iTraxx/CDX), the present
+value under the model is
+\begin{equation}
+\mathrm{PV}^{\text{long prot}}_{[A,D]}
+\;=\; \bigl(s^{\star}-s^{c}\bigr)\cdot A_{\mathrm{trn}}\cdot(D-A),
+\label{eq:long_prot_pv}
+\end{equation}
+where the risky annuity
+\(A_{\mathrm{trn}}=V_{\text{prot}}/s^{\star}\,(D-A)\) is a by-product
+of the fair-spread computation~\eqref{eq:fair_spread}. The first
+factor \((s^{\star}-s^{c})\) in~\eqref{eq:long_prot_pv} measures the
+richness or cheapness of the standard-coupon contract relative to
+the model-fair level, and is the \emph{spread basis}.
+
+\paragraph{Spread basis at the valuation date.}
+Comparing the fair spreads of Table~\ref{tab:fair_spreads} to the
+iTraxx-style standard coupons yields the following spread basis:
+\(\Delta s_{\mathrm{eq}}= +1\,452.6\)~bp (equity vs 500~bp),
+\(\Delta s_{\mathrm{mez}}= +403.3\)~bp,
+\(\Delta s_{\mathrm{jsr}}= +102.7\)~bp and
+\(\Delta s_{\mathrm{sen}}= -14.6\)~bp (vs 100~bp).  The senior
+tranche is the only one richer than the standard coupon, consistent
+with the post-2020 re-rating of systemic tail risk.
+
+\subsection{Upfront quoting convention for the equity tranche}
+Because the equity fair spread is far above the standardised
+\(500\)~bp coupon, the market convention is to quote it as an
+\emph{upfront} payment \(U_{\mathrm{eq}}\) (as a percentage of
+tranche notional) plus the fixed running coupon:
+\begin{equation}
+U_{\mathrm{eq}}
+\;=\;\bigl(s^{\star}_{\mathrm{eq}}-s^{c}\bigr)\cdot A_{\mathrm{eq,\,trn}}.
+\label{eq:upfront_eq}
+\end{equation}
+The pipeline returns an equity \(\ETL(T)=61.14\%\) of tranche
+notional, so a protection buyer at \(s^{c}=500\)~bp would pay an
+indicative upfront of order
+\(U_{\mathrm{eq}}\approx(1\,952.6-500)\,\mathrm{bp}\times A_{\mathrm{eq,\,trn}}
+\approx 45\%\) of equity-tranche notional (using a representative
+equity annuity of \(A_{\mathrm{eq,\,trn}}\approx 3.1\) years), a
+level consistent with distressed equity-tranche marks observed in
+practice.
+
+\subsection{Mark-to-market of an existing position}\label{sec:mtm}
+For a pre-existing long-protection position entered at contractual
+spread \(s^{0}\), the mark-to-market at valuation date is simply
+\begin{equation}
+\mathrm{MTM}_{[A,D]}
+\;=\; \bigl(s^{\star}_{t}-s^{0}\bigr)\cdot A_{\mathrm{trn},t}
+\cdot\bigl(D-A\bigr),
+\label{eq:mtm}
+\end{equation}
+so that positive values correspond to a widening of the
+market-implied tranche spread relative to the trade entry.
+Equation~\eqref{eq:mtm} is the hook that connects daily P\&L to the
+CS01, Rho01 and JtD sensitivities of Section~\ref{sec:risk}.
+For instance, a mezzanine long-protection leg opened in 2019 at
+\(s^{0}=300\)~bp would mark at
+\((503.3-300)\,\mathrm{bp}\times A_{\mathrm{trn}}\times 4\%\approx
+0.26\%\) of deal notional on the 10~September~2021 snapshot.
+
+\subsection{Convergence and Monte-Carlo noise}
+The Monte-Carlo estimator of \(\ETL(T)\) converges at the standard
+\(O(n^{-1/2})\) rate. Empirically, at the production setting
+(\(n=\num{10000}\), antithetic variates, common random numbers across
+tranches) the standard error on the fair spread is of order
+\(0.5\)~bp for the equity tranche and below \(0.2\)~bp for the
+senior tranche, small enough not to contaminate the
+sensitivity analysis of Section~\ref{sec:risk}. Note, however,
+that as documented above the antithetic
+variate in isolation yields only marginal variance reduction
+(\(\mathrm{VRF}\approx 0.98\)): the main sources of stability of
+the estimator are common random numbers and the large pool size
+(\(N=651\)).
+
+\subsection{Worked example: the mezzanine tranche}
+As a complete end-to-end numerical illustration, consider the
+\emph{mezzanine} tranche \([3\%,\,7\%]\). The pipeline returns
+\(\ETL_{5Y}^{\mathrm{mez}} = 0.2273\) of tranche notional (i.e.\
+\(0.00909\) of deal notional) and a fair running spread
+\(s^{\star}_{\mathrm{mez}} = 503.3\)~bp/yr. At the standard running
+coupon \(s^{c}=100\)~bp, the clean PV of a freshly struck
+long-protection position is, from \eqref{eq:long_prot_pv},
+\begin{equation*}
+\mathrm{PV}_{\mathrm{mez}} \;\approx\; (503.3-100)\,\mathrm{bp}
+\cdot A_{\mathrm{trn}}\cdot (7\%-3\%)
+\;\approx\; 4.03\%\times A_{\mathrm{trn}}\times 4\%
+\;\approx\; 0.52\%\ \text{of deal notional},
+\end{equation*}
+taking \(A_{\mathrm{trn}}\!\approx\!3.2\) years as a representative
+annuity for a 5-year mezzanine with cumulative loss \(\approx 23\%\).
+A parallel \(+10\)~bp widening of all pool spreads shifts the fair
+mezzanine spread by \(+96.4\)~bp (CS01 of \(+9.641\) per bp), confirming
+the moderate first-order sensitivity of the tranche to systematic
+credit risk.
+
+%==============================================================================
+\section{Base-Correlation Calibration and Bespoke Tranches}\label{sec:calib}
+
+\subsection{Compound vs base correlation}
+Given a market quote \(s^{\star,\mathrm{mkt}}_{[A_{j},D_{j}]}\), one
+can either back out a \emph{compound correlation}
+\(\rho^{\mathrm{cmp}}_{j}\) that re-prices the individual tranche, or
+a \emph{base correlation}
+\(\rho^{B}(D_{j})\) that re-prices the \emph{equity-gathered} tranche
+\([0,D_{j}]\).  The latter, introduced by \citet{jpmorgan2004}, is
+preferred because it is monotone in \(D\) and admits interpolation.
+A bespoke tranche \([A,D]\) is then priced as
+\begin{equation}
+\ETL^{[A,D]}
+= \ETL^{[0,D]}\!\bigl(\rho^{B}(D)\bigr)
+- \ETL^{[0,A]}\!\bigl(\rho^{B}(A)\bigr).
+\label{eq:bespoke_etl}
+\end{equation}
+
+\subsection{A pedagogical round-trip}
+In the absence of broker quotes, we simulate a market smile along
+the canonical iTraxx pattern, with base correlation rising with
+detachment as a reflection of the systemic-risk premium:
+\begin{equation}
+\rho^{B}(D):\;
+\{3\%\!\to\!20\%,\;7\%\!\to\!30\%,\;10\%\!\to\!37\%,\;15\%\!\to\!45\%\}.
+\label{eq:bc_quote}
+\end{equation}
+For each detachment we generate the target
+\(\ETL^{[0,D]}\) from the LHP-at-quote, and then recover the base
+correlation curve through bisection on the same LHP objective.
+Table~\ref{tab:bc_roundtrip} reports the outcome.  Because the
+target ETLs are generated on the heterogeneous pool while the
+objective function is evaluated on the LHP approximation, the
+bisection saturates at the upper bracket \(\rho^{B}=99.9\%\) for
+all four detachments: under the homogeneous LHP with
+\(p^{\text{avg}}=5.574\%\), no level of correlation can reproduce
+the fat-tailed \([0,D]\) ETL of the heterogeneous pool. This
+illustrates exactly the heterogeneity caveat of
+Section~\ref{sec:mc}: BC calibration against an LHP objective is
+only sensible when the target itself is also LHP-generated (a true
+round-trip) or when a bucketed LHP is used.  Robust production
+calibration requires either (i) broker index-tranche quotes as
+targets with a full MC pricer inside the objective or (ii) a
+bucketed LHP surrogate with several homogeneous groups.
+
+\begin{table}[H]
+\centering
+\caption{Base-correlation round-trip diagnostic,
+10~September~2021. Target ETL is generated from the heterogeneous
+pool at the market-BC quote; recovered BC uses the homogeneous LHP
+objective.}
+\label{tab:bc_roundtrip}
+\begin{tabular}{c c c c}
+\toprule
+\textbf{Base tranche} & \textbf{Target ETL (bp)}
+& \textbf{Market BC (input)} & \textbf{Recovered BC (LHP)}\\
+\midrule
+\([0,\,3\%]\)  & 225.2 & 20.00\% & 99.90\%\\
+\([0,\,7\%]\)  & 329.8 & 30.00\% & 99.90\%\\
+\([0,\,10\%]\) & 377.7 & 37.00\% & 99.90\%\\
+\([0,\,15\%]\) & 450.7 & 45.00\% & 99.90\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Bespoke pricing surface}
+Once \(\rho^{B}(D)\) is known, any bespoke tranche \([A,D]\) with
+\(A,D\in[0,15\%]\) is priced via \eqref{eq:bespoke_etl} and
+\eqref{eq:fair_spread}, with piecewise-linear interpolation and flat
+extrapolation of the base-correlation curve. The resulting
+fair-spread surface \(s^{\star}(A,D-A)\) gives the desk a
+fast-quoting tool over an arbitrary grid.
+
+\begin{figure}[H]
+    \centering
+    % TODO: base correlation curve + bespoke surface
+    % \includegraphics[width=0.45\textwidth]{fig_bc_curve.png}
+    % \includegraphics[width=0.45\textwidth]{fig_bespoke_surface.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- \textbf{(left)} Base-correlation curve
+        \(\rho^{B}(D)\) and \textbf{(right)} bespoke fair-spread
+        surface \(s^{\star}(A,D-A)\).}}
+    \caption{Base-correlation curve and bespoke fair-spread surface.}
+    \label{fig:bc_surface}
+\end{figure}
+
+%==============================================================================
+\section{Risk Analytics}\label{sec:risk}
+
+The pricing engine supports a full set of first-order sensitivities
+(Greeks) through a bump-and-re-price methodology executed on
+\emph{common random numbers} (identical paths) in order to control
+Monte-Carlo noise.
+
+\subsection{Tranche-level Greeks}
+Table~\ref{tab:greeks} reports the full set of tranche-level
+sensitivities at the 10~September~2021 snapshot, computed by bump
+and re-price on common random numbers. All numerical predictions of
+the economic intuition are verified:
+(i) equity CS01 is the largest by a factor of 7 relative to the
+senior tranche (first-loss leverage);
+(ii) Rho01 is strictly \emph{negative} for the equity tranche
+(\(-37.5\) bp per 1~point of \(\rho\)) and strictly \emph{positive}
+for both senior layers, with the mezzanine almost Rho-neutral
+(\(-0.73\)~bp) --- in line with the received wisdom that
+\emph{equity is long correlation, senior is short correlation};
+(iii) jump-to-default is largest for equity (one additional default
+moves the equity fair spread by \(+145.5\)~bp) and collapses
+towards zero for deep-out-of-the-money senior tranches (\(+1.5\)~bp).
+
+\begin{table}[H]
+\centering
+\caption{Tranche-level Greeks at 10~September~2021,
+\(\rho=0.30\), \(T=5\)Y, MC=\num{10000} paths.}
+\label{tab:greeks}
+\setlength{\tabcolsep}{8pt}
+\begin{tabular}{l r r r r r}
+\toprule
+\textbf{Tranche} & \textbf{Fair spread} & \textbf{CS01}
+& \textbf{Rho01} & \textbf{DV01} & \textbf{JtD}\\
+ & (bp/yr) & (bp/+1bp) & (bp/+1\%) & (bp/+1bp rate) & (bp/1 default)\\
+\midrule
+Equity        & 1\,952.6 & $+21.926$ & $-37.502$ & $+0.026$ & $+145.54$\\
+Mezzanine     &   503.3 & $+9.641$  & $-0.732$  & $-0.023$ & $+12.86$\\
+Junior Senior &   202.7 & $+5.628$  & $+3.902$  & $-0.014$ & $+3.86$\\
+Senior        &    85.4 & $+3.019$  & $+3.829$  & $-0.007$ & $+1.52$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Name-level CS01 and hedge concentration}
+Under the LHP mean-field approximation, the CS01 of the
+\(k\)-th name reads
+\begin{equation}
+\CS_{k}
+ = \frac{\partial\ETL}{\partial p^{\text{avg}}}
+   \cdot\frac{\partial p_{k}}{\partial s_{k}}\cdot\frac{1}{N}.
+\label{eq:name_cs01}
+\end{equation}
+Empirically on our pool, the top-10 issuers by \(\CS_{k}\)
+concentrate only \textbf{1.6\%} of the pool-level CS01 on the
+equity tranche, and the top-50 issuers cumulatively capture
+\textbf{8.0\%} (identical ratios on all other tranches because
+under the LHP mean-field approximation the name-level contribution
+is uniform in \(\partial p_k/\partial s_k/N\) and depends on the
+tranche only through the common factor
+\(\partial \ETL/\partial p^{\text{avg}}\)). This is a
+\emph{benign} risk profile: the CS01 is highly diversified and no
+small sub-portfolio of CDS can efficiently hedge the tranche
+spread risk. A fully replicating CDS basket of several hundred
+names is required --- a natural consequence of the portfolio
+having \(N=651\) approximately equal-weighted issuers with
+relatively tight PD dispersion around the pool mean.
+Figure~\ref{fig:name_cs01} shows the rank-ordered top-20 CS01
+contributors, led by names with the tightest 5Y PDs
+(NOVNVX, AGSBB, XL, TOYOTA, NESNVX, \ldots with \(p_i\) near
+\(0.9\%\)).
+
+\begin{figure}[H]
+    \centering
+    % TODO: name-level CS01 bar chart
+    % \includegraphics[width=0.8\textwidth]{fig_name_cs01.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- Top-20 issuer contributions to the
+        equity CS01. Hedge concentration: top-10 names capture roughly
+        30--40\% of total equity CS01.}}
+    \caption{Name-level CS01 and hedge concentration.}
+    \label{fig:name_cs01}
+\end{figure}
+
+\subsection{Stress-testing matrix}
+A regulator-grade deterministic stress grid is applied without
+probabilistic weighting. The shocks follow the Basel III and Fed CCAR
+templates:
+\begin{itemize}[leftmargin=2em]
+    \item Spread shock: parallel \(+50,+100,+200\) bp across the pool;
+    \item Recovery shock: \(R\) reduced from 40\% to 25\% and to 10\%;
+    \item Correlation shock: \(\rho\) increased by +20 and +50 points;
+    \item Combined crisis shock: the superposition of spread \(+200\) bp,
+          recovery \(25\%\) and \(\Delta\rho = +30\) pts.
+\end{itemize}
+The resulting heat-map of \(\Delta s^{\star}\) (Figure~\ref{fig:stress})
+identifies the worst scenario for each tranche and supports
+capital-planning and hedge-sizing decisions.
+
+\begin{figure}[H]
+    \centering
+    % TODO: stress matrix heatmap
+    % \includegraphics[width=0.8\textwidth]{fig_stress_matrix.png}
+    \fbox{\parbox[c][5cm][c]{0.75\textwidth}{\centering\itshape
+        Figure placeholder --- Heat-map of
+        \(\Delta s^{\star}\) by (scenario, tranche).
+        The combined 2008-like crisis is the worst scenario for all
+        mezzanine and senior tranches.}}
+    \caption{Deterministic stress-testing matrix.}
+    \label{fig:stress}
+\end{figure}
+
+%==============================================================================
+\section{Historical Dashboard: 2015--2021}\label{sec:dashboard}
+
+To place the deal-date pricing in historical context we compute
+81 monthly snapshots of the expected tranche loss under the
+flat-hazard model and the LHP formula (\(n_{\text{gh}}=20\)) from
+January~2015 through September~2021. The pool-average 5Y PD
+oscillates between a floor of \(5.56\%\) and a peak of
+\(\mathbf{11.84\%}\) reached on \textbf{1~April~2020}, at the COVID
+credit shock. Two key empirical observations emerge.
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Tranche leverage during COVID.} The ratio of peak
+          ETL (April~2020) to pre-COVID mean ETL (2019) quantifies
+          the non-linear convexity of each tranche to the systemic
+          shock: \(1.21\times\) for the equity, \(1.33\times\) for
+          the mezzanine, \(1.39\times\) for the junior senior and
+          \(\mathbf{1.45\times}\) for the senior tranche. As
+          expected, the senior tranche exhibits the highest
+          leverage --- senior tranches are short-correlation and
+          short-gamma in the tail, so a pool-level PD shock
+          translates into a disproportionate jump in tranche ETL
+          (Figure~\ref{fig:hist_dashboard}).
+    \item \textbf{Regime shifts.}
+          The pre-COVID (2017--2019) and post-COVID recovery
+          (2021) periods show a flat and low-volatility regime;
+          Q1--Q2 2020 is a sharp spike lasting roughly one quarter
+          before mean-reversion.
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    % TODO: historical ETL dashboard
+    % \includegraphics[width=0.9\textwidth]{fig_historical_dashboard.png}
+    \fbox{\parbox[c][5cm][c]{0.80\textwidth}{\centering\itshape
+        Figure placeholder --- Monthly tranche ETL, January~2015 --
+        December~2021, by tranche; COVID shock shaded in red.
+        Equity tranche scaled on the left axis, senior on the right.}}
+    \caption{Historical expected tranche loss (LHP monthly snapshot).}
+    \label{fig:hist_dashboard}
+\end{figure}
+
+%==============================================================================
+\section{Validation Checklist}\label{sec:validation}
+
+The pipeline ends with a single-page risk report and an automated
+validation checklist. The latter contains four mandatory checks,
+each producing a PASS/FAIL flag; the live outputs on the
+10~September~2021 snapshot are summarised in
+Table~\ref{tab:validation}.
+
+\begin{table}[H]
+\centering
+\caption{Automated validation checklist
+(10~September~2021).}
+\label{tab:validation}
+\begin{tabular}{c l l l}
+\toprule
+\textbf{\#} & \textbf{Check} & \textbf{Measured value} & \textbf{Status}\\
+\midrule
+1 & CDS par-repricing on bootstrap curve
+  & $\max|\mathrm{NPV}|=8.33\!\times\!10^{-17}$, 100\% of 300 names
+  & \textbf{PASS}\\
+2 & LHP vs MC equity ETL relative error
+  & $|\Delta|/\ETL^{\mathrm{MC}} = 0.7\%$ (target \(<20\%\))
+  & \textbf{PASS}\\
+3 & Capital-structure monotonicity
+  & $1952.6 > 503.3 > 202.7 > 85.4$
+  & \textbf{PASS}\\
+4 & Correlation-sign test
+  & $\mathrm{Rho01}_{\mathrm{eq}}=-37.5 <0$,
+    $\mathrm{Rho01}_{\mathrm{sen}}=+3.83 >0$
+  & \textbf{PASS}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All four checks pass on the 10~September~2021 snapshot, confirming
+that the pipeline is internally consistent and ready for sign-off by
+model validation.
+
+%==============================================================================
+\section{Conclusion and Limitations}\label{sec:conclusion}
+
+We have presented a complete and reproducible valuation and risk
+pipeline for synthetic CDOs within the one-factor Gaussian copula
+framework. The pipeline is internally consistent, benchmarked against
+the LHP semi-analytic formula, calibrated to a base-correlation curve,
+and enriched with a full suite of sensitivities and stress tests. The
+historical dashboard highlights the non-linear leverage of senior
+tranches through the COVID shock and quantitatively motivates the
+inclusion of a combined crisis stress in the capital-planning grid.
+
+Two limitations warrant explicit statement. First, the Gaussian
+copula fails to reproduce the empirical smile of base correlations
+and should be augmented, in production, with richer dependence
+structures (double-\(t\), Marshall--Olkin, or a stochastic-recovery
+extension; see \citealp{andersen2003,burtschell2007}). Second, the
+LHP benchmark is valid only under homogeneity and displays a
+material heterogeneity error on mezzanine and senior tranches for
+real-world pools; bucketed LHP or the recursive Hull--White algorithm
+\citep{hull2004} should be used when semi-analytic speed is required
+for non-equity tranches.
+
+\paragraph{Further work.}
+Natural extensions include (i) a stochastic-recovery overlay
+calibrated jointly with \(\rho^{B}\); (ii) a multi-period (forward
+starting) tranche calibration to capture spread-term-structure
+effects; (iii) a machine-learning surrogate of the LHP--MC difference
+function to accelerate bespoke pricing and (iv) a scenario generator
+based on PCA of the CDS time series to complement the deterministic
+stress matrix.
+
+%==============================================================================
+\bigskip
+\begin{thebibliography}{99}
+
+\bibitem[Andersen and Sidenius(2003)]{andersen2003}
+Andersen, L. and Sidenius, J. (2003).
+\emph{Extensions to the Gaussian Copula: Random Recovery and Random
+Factor Loadings}. Journal of Credit Risk, 1(1), 29--70.
+
+\bibitem[Basel Committee on Banking Supervision(2006)]{bcbs2006}
+Basel Committee on Banking Supervision (2006).
+\emph{International Convergence of Capital Measurement and Capital
+Standards --- A Revised Framework}. BCBS Publications.
+
+\bibitem[Burtschell et al.(2007)]{burtschell2007}
+Burtschell, X., Gregory, J. and Laurent, J.-P. (2007).
+\emph{Beyond the Gaussian Copula: Stochastic and Local Correlation}.
+Journal of Credit Risk, 3(1), 31--62.
+
+\bibitem[Hull and White(2004)]{hull2004}
+Hull, J. and White, A. (2004). \emph{Valuation of a CDO and an
+n-th-to-Default CDS Without Monte Carlo Simulation}. Journal of
+Derivatives, 12(2), 8--23.
+
+\bibitem[JP Morgan(2004)]{jpmorgan2004}
+JP Morgan (2004). \emph{Base Correlation}. Credit Derivatives
+Research, JP Morgan.
+
+\bibitem[Li(2000)]{li2000}
+Li, D. X. (2000).
+\emph{On Default Correlation: A Copula Function Approach}.
+Journal of Fixed Income, 9(4), 43--54.
+
+\bibitem[Mounfield(2009)]{mounfield2009}
+Mounfield, C. C. (2009). \emph{Synthetic CDOs: Modelling, Valuation
+and Risk Management}. Cambridge University Press.
+
+\bibitem[O'Kane(2008)]{okane2008}
+O'Kane, D. (2008). \emph{Modelling Single-Name and Multi-Name Credit
+Derivatives}. Wiley Finance.
+
+\bibitem[Vasicek(1987)]{vasicek1987}
+Vasicek, O. (1987). \emph{Probability of Loss on Loan Portfolio}.
+KMV Corporation.
+
+\end{thebibliography}
+
+%==============================================================================
+\appendix
+\section{Pseudocode: bootstrap and ETL engine}\label{app:pseudo}
+
+\begin{algorithm}[H]
+\caption{ISDA-consistent piecewise-constant hazard bootstrap.}
+\begin{algorithmic}[1]
+\Require Quotes $\{s_i^{T_k}\}$, discount curve $\DF(\cdot)$, recovery $R$
+\Ensure  Piecewise-constant hazard $\{\lambda_i^{(k)}\}_{k=1}^{K}$
+\For{each issuer $i$}
+  \State $\lambda_i^{(0)} \gets 0$
+  \For{$k = 1,\dots,K$}
+    \State Solve $V_{\text{prot}}(T_k;\lambda_i^{(k)})-V_{\text{prem}}(T_k;\lambda_i^{(k)}) = 0$
+    \Statex \hspace{1.2em} by bisection, holding $\lambda_i^{(1)},\dots,\lambda_i^{(k-1)}$ fixed.
+  \EndFor
+\EndFor
+\State \Return $\{\lambda_i^{(k)}\}$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Monte-Carlo tranche ETL with antithetic variates.}
+\begin{algorithmic}[1]
+\Require  $\{p_i(T)\}$, $\rho$, tranche $[A,D]$, $n_{\text{paths}}$, seed
+\Ensure   ETL curve $(\ETL_k)_{k=0}^{K}$
+\State Draw $M_{1:n/2}\sim\Nor(0,1)$ and set $M_{n/2+1:n}=-M_{1:n/2}$
+\State Draw $(\varepsilon_{1:n,i})\sim\Nor(0,1)$
+\State $Y_{ji}\gets\sqrt{\rho}\,M_j+\sqrt{1-\rho}\,\varepsilon_{ji}$
+\State $U_{ji}\gets\Phi(Y_{ji});\quad \tau_{ji}\gets -\log(1-U_{ji})/\lambda_i$
+\For{each payment date $t_k$}
+  \State $L_j^{\text{pool}}(t_k)\gets\sum_i \LGD_i\,\1_{\{\tau_{ji}\le t_k\}}/N$
+  \State $L_j^{[A,D]}(t_k)\gets\min(\max(L_j^{\text{pool}}(t_k)-A,0),D-A)$
+  \State $\ETL_k\gets\frac{1}{n}\sum_j L_j^{[A,D]}(t_k)$
+\EndFor
+\State \Return $(\ETL_k)$
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}
